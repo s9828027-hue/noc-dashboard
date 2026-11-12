@@ -1,0 +1,6 @@
+# 示範模式(python dashboard_server.py --demo)不需要安裝任何套件,只用 Python 標準函式庫。
+# 以下是連接真實設備時才需要的套件:
+requests            # 各輪詢程式呼叫 OpManager / NetFlow Analyzer / Meraki API
+maxminddb           # 選用:外部流量國別地圖(讀離線的 IP 國別資料庫)
+cryptography        # 選用:ap_proxy.py 產生自簽憑證(HTTPS)
+google-auth         # 選用:從 Google 試算表讀取已知事件(連線品質診斷用)

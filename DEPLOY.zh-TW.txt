@@ -1,0 +1,265 @@
+﻿NOC 大螢幕 — 伺服器部署說明(DB server + AP server)
+====================================================
+
+(公開版說明)這份文件是實際部署在兩台 Windows Server 時用的步驟,文中的 IP 都是範例。
+本儲存庫把所有檔案放在同一個資料夾:文中的「DB-server 資料夾」= 整個專案資料夾;
+「AP-server 資料夾」只需要 ap_proxy.py 與 noc_service.ps1 兩個檔案。
+只想看畫面的話不用部署,執行 python dashboard_server.py --demo 即可(見 README)。
+
+架構
+----
+  電視牆瀏覽器 --> AP server(NAT IP,只放轉發程式 ap_proxy.py,沒有 API Key)
+                      --> DB server(內網:收集程式 + 資料伺服器,API Key 只放這台)--> OpManager / NFA
+
+兩台都是 Windows Server,全部用「開機自動執行的工作排程」,不需要有人登入。
+下面所有 PowerShell 指令,都要用「系統管理員身分」開啟 PowerShell。
+要先允許執行腳本(只對這個視窗有效):  Set-ExecutionPolicy -Scope Process Bypass
+
+
+一、DB server(收集程式)
+----------------------
+1. 安裝 Python(從 python.org 下載,安裝時勾選「Add python.exe to PATH」,並選「Install for all users」)。
+   然後用系統管理員 PowerShell 執行:  pip install requests maxminddb
+   (一定要用系統管理員執行,才會裝在「所有使用者」都能用的位置,開機排程用的 SYSTEM 帳號才找得到。)
+
+2. 把 DB-server 資料夾放到伺服器,例如 D:\noc
+   再從你目前跑大螢幕的那台電腦,把這些檔案一併複製過來(有的話):
+     thresholds.json  pending_review.json  history.csv
+     dbip-country-lite.mmdb  dbip-asn-lite.mmdb
+   (history.csv 是累積中的一週基準資料,複製過來才不會從頭算。)
+
+3. 確認這台 DB server 連得到 OpManager:
+     Test-NetConnection opmanager.example.internal -Port 8061      <- TcpTestSucceeded 要是 True
+
+4. 安裝(把 10.1.1.30 換成 AP server 的 IP,是「DB server 看到的」AP server IP):
+     cd D:\noc
+     .\noc_service.ps1 -Action Install -Role Collector -ApServerIp 10.1.1.30
+   過程中會要你輸入 OpManager API Key(畫面不顯示),會先向 OpManager 驗證,通過才會儲存。
+   它會:註冊 4 個工作排程、立刻啟動、並建立防火牆規則(TCP 8080 只允許 AP server 連進來)。
+
+5. 檢查:
+     .\noc_service.ps1 -Action Status -Role Collector
+   會列出 4 個工作的狀態、最近幾行記錄,以及 4 份資料(線路/防火牆/設備/國別)是否正常更新。
+   完整記錄在 logs\ 資料夾。
+
+線路使用率門檻(固定):使用率 >= 70% 該方向顯示黃色;>= 90% 變紅並自動跳出 Top N。
+要改數字:編輯 netflow_poll_poc.py 開頭的 WARN_PCT / CRIT_PCT(單一線路可在 LINE_MAP 加 "warn_pct" / "crit_pct"),存檔後
+執行 -Action Stop 再 -Action Start 即可。
+
+注意:同一個資料夾裡,不要同時用舊的 start_noc.bat(桌面版)。同一支程式只能在一個地方跑,
+否則兩邊會同時寫同一份資料。切換到伺服器後,請先把桌面那台用 stop_noc.bat 停掉。
+
+
+一之一、高風險 IP 偵測(內部主機連往簽核系統清單內的 IP)
+------------------------------------------------------------
+作用:每 5 分鐘,把「威脅情資簽核系統」每日發佈的 txt 清單(預設 C:\noc\risk_lists),
+拿來比對 4 條 WAN 線路「OUT 方向」的 Top 連線。有新的命中,大螢幕會自動彈出平面地圖,
+用紅色標出「台灣 → 該國」,右側列出命中的 IP、清單項目、線路、流量與(推算的)內部主機;
+彈窗關閉後,畫面上方仍會留著紅色橫幅,點它可以再打開。同時間如果有線路 >=90% 的 Top N 彈窗,
+高風險優先,Top N 排在後面,等高風險視窗關閉後再補跳出來。
+不需要另外安裝:risk_ip_match.py 由 dashboard_server.py 在背景自動執行(跟 Dashboard 同一個排程工作)。
+1. 先在 DB server 檢查清單讀得到(不需要 API Key):
+     cd D:\noc
+     python risk_ip_match.py --check
+   會印出讀到哪些檔、單一 IP / 網段 / 過大網段 / 網域各幾筆。筆數是 0 或「格式無法辨識」很多,把檔案前幾行貼給我調整。
+2. 清單檔案的挑選規則:取修改時間最新的 .txt,加上與它相差 6 小時內的其他 .txt(同一次發佈的檔案一起讀);
+   舊日期的檔案不會讀,避免已移除的 IP 還在比對。
+3. 資料夾不是預設路徑:在 Dashboard 的排程參數加 --risk-dir,或直接修改 risk_ip_match.py 開頭的 DEFAULT_RISK_DIR。
+4. 排程用的 SYSTEM 帳號要讀得到清單資料夾(一般 NTFS 預設可以;若資料夾有限制權限,要加讀取權)。
+5. 每次「新出現」的命中會追加到 risk_hits_log.csv(用 Excel 可開),方便事後追查是哪台內部主機。
+6. 畫面上方若出現「高風險 IP 偵測異常:…」代表清單讀不到或 NetFlow 查不到,照訊息處理即可。
+範圍與限制:只偵測 OUT(IN 已由防火牆阻擋);預設「只有命中確切單一 IP 才彈窗、亮徽章」,命中清單裡的網段(含過大網段)
+只記錄到 risk_hits_log.csv(「命中類型」欄)、在視窗底部低調顯示筆數,不告警。想讓一般網段也彈窗:把 risk_ip_match.py 開頭的
+ALERT_ON_CIDR 改成 True(或設環境變數 NOC_RISK_ALERT_CIDR=1);過大網段永遠不彈窗;網域無法比對;
+NetFlow 每小時彙總、只含 Top N 連線,流量很小的連線可能偵測不到;命中不等於一定中毒,請搭配防火牆紀錄確認。
+
+
+一之二、AP server 還沒申請好:先讓 DB server 直接給電視牆看(暫時做法)
+----------------------------------------------------------------------
+dashboard_server.py 本身就能直接給瀏覽器看,AP server 只是「中間多一層轉發」。所以 AP 還沒好的時候:
+1. 照「一、DB server」安裝,但 -ApServerIp 改填「電視牆(或要看畫面的那台)連到 DB server 時,DB server 看到的來源 IP」:
+     .\noc_service.ps1 -Action Install -Role Collector -ApServerIp 外部那個單一IP
+   這個 IP 會同時做兩件事:(1) Windows 防火牆規則只放行它連 TCP 8080;(2) 資料伺服器程式只接受它(本機一律允許)。
+   -ApServerIp 在這裡的意思就是「允許連進來看畫面的來源」,不一定要是 AP server。
+2. 網路那邊請對方開 ACL:該來源 IP → DB server 的 TCP 8080(只開這一條)。
+3. 電視牆瀏覽器開:  http://DB-server的IP:8080/
+   (有 NAT 的話,填的是 DB server 對外被看到的位址;ACL/防火牆填的來源 IP 要是 DB server 實際看到的那個。)
+   連不上時,在 DB server 看  logs\NOC-Dashboard.log;被擋的來源會是 403。
+4. 之後 AP server 申請好了:
+   - DB server 重新執行  .\noc_service.ps1 -Action Install -Role Collector -ApServerIp AP的IP  (改成只允許 AP;會覆蓋舊規則)
+   - 請網路端把原本「外部IP → DB server」的 ACL 收回
+   - AP server 照「二」安裝,電視牆改開 AP 的網址。
+暫時做法的取捨:DB server 直接對外開了一個唯讀的網頁埠(只提供畫面與資料,不提供 API Key,也不能下指令),
+且只放行單一來源 IP;AP 隔離層上線前,請特別確認防火牆規則與網路 ACL 都只限那一個 IP。
+
+
+一之三、Meraki 大樓無線 AP 健康度(左下角大樓圖 + AP 離線自動彈出樓層平面圖)
+------------------------------------------------------------------------------
+作用:左下角原本的「核心設備存活率」換成大樓圖(B1F + 1F~7F,共 96 支 AP)。每支 AP 一顆燈號:
+圓=正常、三角=警告、菱形=離線、空心圓=休眠/未知(不只靠顏色)。樓層燈號 = 該層最糟的 AP。
+有 AP「離線」時,自動彈出該樓層的 Meraki 平面圖(轉成透明線稿),離線 AP 會閃紅圈;右上角出現「AP 異常 N 筆未讀」徽章。
+關閉視窗或點徽章 = 已讀,不再重複彈出(AP 恢復後再離線會當成新的)。「警告」只在徽章與清單顯示,不彈窗。
+原本的核心設備 ping 縮成右上角一顆小燈。
+連線成功率只在彈窗的 AP 清單當參考資訊,不影響燈號、不彈窗(你的環境驗證失敗多,數字一直偏低,不適合當告警條件)。
+沒有 Meraki 資料(沒設金鑰、或檔案不存在)時,畫面自動維持原本的核心設備表格,所以可以安全上線、隨時退回。
+
+只有 DB server 需要做(AP server 只要換新版 ap_proxy.py,因為平面圖也要經過它轉發):
+
+1. 網路(請網管開 DB server 往外 HTTPS 443):
+     api.meraki.com
+     meraki-apac.s3.ap-northeast-1.amazonaws.com        (平面圖圖片,只有這台下載;電視牆不需要連外)
+   測試:  Test-NetConnection api.meraki.com -Port 443
+
+2. 把新版檔案覆蓋到 DB server 的 D:\noc:
+     meraki_poll.py   dashboard_server.py   dashboard.html
+   (舊檔先備份:copy dashboard.html dashboard.bak.html;copy dashboard_server.py dashboard_server.bak.py)
+
+3. 儲存 Meraki API Key(用「系統管理員」PowerShell;金鑰用 Windows 本機加密存成 meraki_apikey.machine.dat,畫面不顯示):
+     cd D:\noc
+     python meraki_poll.py --set-key
+   Key 請用「唯讀」(Read-only)組織管理員產生:Dashboard 右上角帳號 → My profile → API access → Generate new API key。
+   (SSO 登入的帳號沒有這個選項,請用一個本機帳號,或請 org admin 幫忙建立。)
+
+4. 檢查金鑰與連線:
+     python meraki_poll.py --check-key       <- 要看到你的組織名稱
+     python meraki_poll.py --dry             <- 只看結果,不寫檔;應該顯示 HQ 共 8 層、96 支 AP
+
+5. 重新啟動收集程式,讓資料伺服器載入新版:
+     .\noc_service.ps1 -Action Stop -Role Collector
+     .\noc_service.ps1 -Action Start -Role Collector
+   資料伺服器會每 1 分鐘自動執行 meraki_poll.py(平面圖第一次會下載到 meraki_plans\,之後只在平面圖有更新時才重新下載)。
+   Meraki 的圖片連結 7 天會過期,所以不能直接給瀏覽器用,一律由 DB server 抓下來再提供。
+
+6. AP server:把新版 ap_proxy.py 覆蓋到 D:\noc-proxy,然後
+     .\noc_service.ps1 -Action Stop -Role Proxy
+     .\noc_service.ps1 -Action Start -Role Proxy
+   (新版多放行 /api/meraki_plan,用來載入平面圖。)
+
+7. 電視牆瀏覽器按 Ctrl+F5 重新整理。看到「大樓無線 AP 健康度」就完成。
+   也可檢查  http://DB-server:8080/api/summary  裡面有 "meraki" 區塊、"status":"ok"。
+
+搜尋功能(右上角「搜尋」按鈕):輸入使用者名稱(如 amylee)、裝置名稱、MAC(可含 : 或 -,可只輸入一部分)或 IP,
+找出裝置目前(或最後一次)連在哪一層、哪支 AP,點結果會彈出該層平面圖並用藍色圈標出那支 AP。
+- 範圍:最近 24 小時內有連線紀錄的裝置;位置只精確到「連在哪支 AP」,不是精確座標。
+- 隱私:搜尋字串與結果只存在視窗的記憶體,關閉就清除(閒置 1 分鐘自動關閉);不寫 localStorage、不放網址、
+  伺服器不記錄搜尋字串與結果,用戶端清單只在記憶體暫存 60 秒。
+- 更新檔案:dashboard.html、dashboard_server.py、meraki_poll.py(DB server)與 ap_proxy.py(AP server)都要換新版,
+  各自重啟(Collector / Proxy)。沒換 ap_proxy.py 時,從電視牆搜尋會失敗(DB server 本機不受影響)。
+- 名稱要搜得到,取決於 Meraki 裡的「使用者」或「裝置名稱」欄位有沒有該名字(跟 Meraki 後台搜尋的來源相同)。
+- 查詢權限:跟大螢幕一樣,靠 -AllowClient / -ApServerIp 的來源白名單限制;能連上大螢幕的人都能搜尋。
+  如果要更嚴格(例如需要登入),請告訴我再加。
+
+連線品質診斷(搜尋結果旁的「診斷」按鈕,用來查「某位使用者無線一直掉包、很卡」):
+在搜尋結果每一筆(無線裝置)右邊有「診斷」按鈕;從平面圖(搜尋點進來的)上方的藍色卡片也有「診斷連線品質」。
+點下去會向 Meraki 查這位用戶最近 1 / 2 / 4 / 24 小時(可切換)的資料,約 5~15 秒,顯示:
+- 一句白話結論 + 判斷方向:偏「AP / 這一區」、偏「用戶位置或裝置」、偏「連線建立過程(驗證/DHCP/DNS)」,或「看起來正常 / 資料不足」。
+- 6 個重點數字:訊號 RSSI/SNR、延遲、換 AP 次數(含來回跳)、斷線次數(含「因通道品質差被斷線」)、連線建立失敗率。
+- 逐條發現(明顯異常 / 需要注意 / 參考)與趨勢圖(SNR、RSSI、延遲,低於門檻的時段用方塊標出)、漫遊到哪些 AP、斷線原因分布、
+  所在 AP 對照(連線人數、失敗率 vs 大樓中位數、通道使用率)——用來判斷是「只有他」還是「整支 AP / 整區」的問題。
+- 三個等級的意思(畫面上也有說明):
+    明顯異常 = 證據強(例如斷線原因 34、訊號大多偏弱、來回漫遊又同時訊號差/斷線),建議處理。
+    需要注意 = 單項偏離,但還不足以斷定;可拉長時間,或請使用者在「卡的當下」回報時間再用 1 小時範圍查。
+    參考     = 背景資訊,多半是正常行為(例如訊號很好時的漫遊、大樓多數人都有的現象)。
+  最上方的結論會寫出「幾類明顯異常/需要注意」與「判斷信心」,並列出「已排除 / 正常的項目」(例如訊號良好、連線建立沒失敗),幫忙縮小範圍。
+- 為了避免「拉長到 4 小時幾乎每個人都有異常」:
+    1) 延遲、連線失敗會跟「大樓其他用戶」比(例如「比大樓 85% 的人差」);大樓多數人也這樣,就只列為參考。
+    2) 訊號很好(SNR ≥ 25、偏弱時段 < 10%)又沒有其他症狀時,漫遊與延遲尖峰降為參考(多半是人在走動、裝置省電、背景流量)。
+    3) 斷線改看「每小時次數」,且「裝置自己離開、閒置被移除」這類正常行為不計入。
+  判斷門檻在 meraki_poll.py 開頭附近:SNR_POOR=20、RSSI_POOR=-75、LAT_HIGH_MS=50、ROAM_PER_HOUR_WARN=6、CHAN_UTIL_BUSY=50(其餘延遲、斷線的級距在 _diagnose 函式)。
+- 補充資料(選用,放在 DB server 的 meraki_poll.py 同一個資料夾,改完不用重啟,下一次診斷就生效):
+    diag_knowledge.json:斷線原因分類(正常/不明/疑似問題)、事件說明比對、已知問題(依 AP 型號與韌體符合時顯示)。範本見 diag_knowledge.sample.json。
+    diag_incidents.csv:已知事件(施工、停電、設備維護、AP 搬移…)。系統只讀這個檔名;diag_incidents.sample.csv 只是範本,不會被讀。
+      做法:複製範本、改名 diag_incidents.csv、刪掉範例列,分享給大家填;你每週把填好的檔案覆蓋到 DB server(meraki_poll.py 同一個資料夾),不用重啟。
+      欄位 start,end,scope,note:時間寫 2026-10-23 14:00(Excel 自動轉成 2026/10/23 14:00 或 10/23/2026 2:00 PM 也認得);
+      scope 填 ALL、樓層(如 4F)或 AP 名稱(簡稱 4W-08 或完整名稱都可),多個用逗號或頓號分隔;end 留空視為 24 小時。
+      存檔請選「CSV UTF-8(逗號分隔)」;存成舊的 Big5 編碼也讀得懂。診斷時若這段時間、這個位置有事件,會列在發現裡並提醒先確認是否相關。
+    (選用,之後想自動化)Google 試算表(例如 Google 表單的回覆表)自動讀取:
+      1) Google Cloud 建專案、啟用 Google Sheets API、建立服務帳戶並下載 JSON 金鑰;把試算表分享給服務帳戶 email(檢視者即可,DB server 不需要任何寫入權限)。
+      2) 網管放行 DB server 連 sheets.googleapis.com、oauth2.googleapis.com(443);DB server 執行 pip install google-auth。
+      3) 管理員 PowerShell:python meraki_poll.py --set-google-key C:\路徑\金鑰.json(加密存成 google_sa.machine.dat,存好後刪除原 JSON)。
+      4) 在 meraki_poll.py 同資料夾建 diag_incidents_source.json:{"spreadsheet_id": "試算表網址中間那串ID", "range": "'表單回應 1'!A:Z", "cache_sec": 300}
+      5) python meraki_poll.py --check-incidents 檢查讀到幾筆;之後每 5 分鐘自動更新,Google 連不上就用上次的內容並在診斷頁註明。與本機 CSV 會合併使用。
+      試算表第一列的題目名稱要含「開始時間」「結束時間」「範圍」「說明」(表單分成「開始日期」「開始時間」兩題也可以)。
+  資料來源(沒有現成可整包匯入的「Meraki 問題清單」,建議自己挑重點登錄):
+    - Meraki 文件「Common Wireless Event Log Messages and Issues」:事件訊息(離開 AP、關聯逾時、unknown reason…)的意思與建議。
+    - IEEE 802.11 的 reason code 表(Table 9-49):數字原因碼的標準意義(例如 34 = 封包一直沒被確認)。
+    - Meraki 韌體 Release Notes(MR / CW 各版本)的 Known issues:把和你們型號、韌體有關的寫進 known_issues。
+    - Cisco Bug Search Tool:查特定型號/韌體的已知 Bug。
+- 先自行驗證資料來源:python meraki_client_probe.py <使用者或MAC> --hours 4(新版多測 3 項:AP 型號韌體、大樓所有用戶的延遲與連線統計;拿不到時診斷會退回只看門檻與訊號,畫面會註明)。
+- 隱私:跟搜尋一樣,結果只存在視窗記憶體,關閉(或閒置 1 分鐘)就清除;不寫 localStorage、不放網址、伺服器不記錄 MAC 與結果檔
+  (DB server 程式記憶體暫存 60 秒以減少 Meraki 呼叫,不寫到磁碟)。AP server 只放行「完整 MAC + 1/2/4/24 小時」格式的請求。
+- 探測腳本只做查詢,會產生含個人資料的 json,用完請刪除。
+- 更新方式與搜尋相同:DB server 換 meraki_poll.py、dashboard_server.py、dashboard.html;AP server 換 ap_proxy.py;各自重啟(Collector / Proxy),瀏覽器 Ctrl+F5。
+- Meraki API 呼叫量:一次診斷約 11 次 API 呼叫(另有「大樓其他用戶比較基準」2 次,只存數字、快取 10 分鐘);伺服器端全站每 0.5 秒最多受理一次,同一人同一時間範圍 60 秒內重複查詢用暫存。
+
+生效後的行為與限制:
+- 狀態來源是 Meraki 回報的設備狀態(online / alerting / offline / dormant)。AP 位置用 Meraki 平面圖上你們實際擺放的位置換算。
+- 資料超過 10 分鐘沒更新:畫面上方出現「Meraki 無線資料已過期」橫幅,且不再自動彈窗(避免拿舊資料誤報)。
+- 只收「HQ」網路與 B1F、01F~07F(B2F/B3F 停車場排除)。要改:meraki_poll.py 開頭的 NETWORK_NAME、FLOORS_INCLUDE。
+- 24 小時在線 AP 趨勢會記在 meraki_history.csv(保留 7 天),之後想做「比平常掉很多才告警」可以用這份資料。
+- 更換金鑰:再執行一次  python meraki_poll.py --set-key。
+- 退回:把備份的 dashboard.html / dashboard_server.py 蓋回去、重啟;或刪除 meraki_apikey.machine.dat,畫面就回到原本的核心設備表格。
+- 記錄:logs\NOC-Dashboard.log 與 meraki_refresh.log。出現 401 = 金鑰錯誤/失效;429 = 呼叫太頻繁(程式會自動等待);連不上 = 步驟 1 的網路還沒開。
+
+
+二、AP server(轉發程式)
+-----------------------
+1. 安裝 Python(同上)。
+   只用 HTTP:這台不需要 pip 安裝任何套件。
+   要用 HTTPS(自簽憑證):用系統管理員 PowerShell 執行  pip install cryptography
+2. 把 AP-server 資料夾放到伺服器,例如 D:\noc-proxy
+3. 確認這台連得到 DB server 的資料伺服器(把 10.1.1.20 換成 DB server 的 IP):
+     Test-NetConnection 10.1.1.20 -Port 8080
+   (要先完成上面第一部分,而且防火牆規則的 -ApServerIp 填的是這台的 IP,這個才會通。)
+4. 安裝:
+     cd D:\noc-proxy
+     .\noc_service.ps1 -Action Install -Role Proxy -Upstream http://10.1.1.20:8080 -AllowClient 10.9.0.0/24
+   -AllowClient:允許哪些來源連到這台。填電視牆的 IP 或網段。
+   如果電視牆是經過 NAT 才連到 AP server,AP server 看到的來源 IP 會是 NAT 設備的 IP,請填那個。
+   它會建立防火牆規則(TCP 8080 只允許這些來源)。
+   【改用 HTTPS(自簽憑證)】在同一行最後加上 -Https -CertNames:
+     .\noc_service.ps1 -Action Install -Role Proxy -Upstream http://10.1.1.20:8080 -AllowClient 10.9.0.0/24 -Https -CertNames 10.9.9.9
+   -CertNames:填「電視牆瀏覽器網址列會打的 IP 或主機名稱」(可多個,逗號分隔,例如 10.9.9.9,ap-server)。
+   網址列打的字,必須出現在這裡,否則瀏覽器會顯示「名稱不符」的另一種錯誤。
+   安裝時會自動產生 ap_proxy_cert.crt(憑證)與 ap_proxy_key.pem(私鑰,只給 SYSTEM / 系統管理員讀,請勿外流),有效 5 年。
+   之後重新執行 Install 會沿用同一張憑證;要換 IP 或快到期時,加上 -RenewCert -CertNames 新的名稱,並重新匯入電視牆電腦。
+   啟用 HTTPS 後,同一個埠「只」提供 HTTPS,打 http:// 會連不上,請改用 https://。
+5. 檢查:
+     .\noc_service.ps1 -Action Status -Role Proxy
+   電視牆瀏覽器開:  http://AP-server的NAT-IP:8080/        (HTTPS 版:https://AP-server的NAT-IP:8080/)
+   檢查頁:          /healthz    (看到 proxy ok、upstream ok 就是整條路徑通了)
+
+6.(只有 HTTPS 才需要)消除瀏覽器「不安全」警告:
+   自簽憑證瀏覽器預設不信任,第一次開會出現警告,按「進階 → 繼續前往」即可使用。
+   想讓警告完全消失:把 ap_proxy_cert.crt 複製到「電視牆那台電腦」,
+     雙擊 → 安裝憑證 → 本機電腦 → 「將所有憑證放入以下的存放區」→ 受信任的根憑證授權單位 → 完成。
+   (或用系統管理員 PowerShell:  Import-Certificate -FilePath .\ap_proxy_cert.crt -CertStoreLocation Cert:\LocalMachine\Root)
+   匯入後請關閉並重開瀏覽器。只需要匯入 .crt;絕對不要把 .pem 私鑰帶出 AP server。
+   公司若有內部 CA,也可以改用 CA 簽的憑證,把 --cert / --key 換成那兩個檔案即可。
+
+
+三、常見問題
+-----------
+- 電視牆開不起來、AP server 的記錄(logs\NOC-ApProxy.log)出現「[拒絕] 來源 IP x.x.x.x」:
+  代表 -AllowClient 沒包含這個 IP。用正確的來源重新執行 Install(會覆蓋舊設定)。
+- /healthz 顯示 upstream 是 HTTP 403:DB server 那邊的 -ApServerIp 填的不是 AP server 實際對 DB server 的來源 IP。
+  在 DB server 重新執行 Install -Role Collector -ApServerIp 正確的IP。
+- 改成 HTTPS 後電視牆打不開:確認網址用 https://,而且網址列的 IP/名稱有包含在 -CertNames 裡。
+  瀏覽器顯示「名稱不符(ERR_CERT_COMMON_NAME_INVALID)」→ 用 -Https -RenewCert -CertNames 正確的名稱 重新安裝,並重新匯入新憑證。
+  瀏覽器顯示「憑證不受信任(ERR_CERT_AUTHORITY_INVALID)」→ 屬正常,按進階繼續,或照第二部分第 6 步匯入憑證。
+- /healthz 顯示 upstream unreachable:AP 連不到 DB server。檢查 DB server 的防火牆規則與網路。
+- 畫面顯示「資料過期」:看 DB server 的 Status 與 logs\*.log;通常是 API Key 失效或連不到 OpManager。
+- 更換 API Key(Key 重新產生時):在 DB server 執行  .\noc_service.ps1 -Action SetKey -Role Collector
+- 更新程式檔:覆蓋檔案後,執行  -Action Stop  再  -Action Start。
+- 暫停 / 移除:-Action Stop / -Action Uninstall(加 -ForgetKey 會一併刪除加密的 API Key)。
+- 查看 Python 路徑有沒有裝成「個人帳號」版本:Status 第一行會顯示;路徑含 \Users\ 的話,
+  SYSTEM 帳號可能用不了,請改用「為所有使用者安裝」的 Python。
+
+四、安全提醒
+-----------
+- API Key 只在 DB server:用 Windows 本機加密存成 noc_apikey.machine.dat,檔案權限只給 SYSTEM 與系統管理員。
+  AP server 沒有 Key、也不需要連 OpManager。
+- 大螢幕網頁本身沒有帳號驗證。請務必靠防火牆 + -AllowClient 限制來源。
+- AP server 對電視牆預設是 HTTP(未加密);加上 -Https 就會改成 HTTPS(自簽憑證)。
+  AP server → DB server 這一段(內網)仍是 HTTP,靠 DB server 防火牆只允許 AP server 來源。
+- 建議向 OpManager 申請一把「只讀」的專用 API Key 給這個系統使用。

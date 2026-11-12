@@ -1,0 +1,20 @@
+{
+  "說明": "把這個檔另存成 diag_knowledge.json(放在 meraki_poll.py 同一個資料夾)才會生效。沒有這個檔時,系統用內建值。改完不用重啟,下一次診斷就會讀到。",
+  "disassoc_reasons": {
+    "1": { "text": "未指定原因(裝置沒說為什麼就斷了)", "cat": "ambiguous" },
+    "3": { "text": "裝置自己離開(關 Wi-Fi、睡眠)", "cat": "benign" }
+  },
+  "event_descriptions": [
+    { "match": "client has left", "cat": "benign" }
+  ],
+  "known_issues": [
+    {
+      "model": "CW9999-範例",
+      "firmware": "CW 99\\.",
+      "title": "範例:這筆不會符合任何 AP,請改成你查到的真實已知問題",
+      "detail": "從 Meraki 韌體 Release Notes 的 Known issues 或 Cisco Bug Search 查到的內容,摘要寫在這裡。",
+      "url": "https://documentation.meraki.com/"
+    }
+  ],
+  "cat 的意思": "benign=正常行為(離開、閒置,不計入斷線偏多)、ambiguous=不明(看頻率)、suspicious=疑似通道/連線問題"
+}

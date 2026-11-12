@@ -1,0 +1,41 @@
+# ── 執行時產生的資料(可能含真實網路資訊,一律不進版控)──
+/latest.json
+/*_latest.json
+/threat_map.json
+/nat_map.json
+/risk_hits.json
+/meraki_health_cache.json
+/history.csv
+/*_history.csv
+/risk_hits_log.csv
+/raw_*.json
+/thresholds.json
+/pending_review.json
+/meraki_plans/
+/meraki_plans_manual/
+/logs/
+*.log
+
+# ── 金鑰、憑證、本機設定(絕對不能進版控)──
+*.dat
+*.pem
+*.crt
+*.key
+.env
+/noc_service_config.json
+/snmp_source.json
+/diag_incidents.csv
+/diag_knowledge.json
+/diag_incidents_source.json
+
+# ── 第三方資料庫(請自行下載,見 threat_map_data.py 開頭說明)──
+*.mmdb
+
+# ── 其他 ──
+__pycache__/
+*.pyc
+*.zip
+*.bak
+*.bak.html
+.vscode/
+.idea/

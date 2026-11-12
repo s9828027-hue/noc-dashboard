@@ -1,0 +1,6 @@
+{
+  "url": "http://10.0.0.50:8130/lines.json",
+  "max_age_sec": 180,
+  "timeout_sec": 5,
+  "enabled": true
+}
